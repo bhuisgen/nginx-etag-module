@@ -1,0 +1,4 @@
+Nginx Etag Module
+by Boris HUISGEN <bhuisgen@hbis.fr>
+
+This module brings the support of the HTTP entity tags (ETags) to Nginx.

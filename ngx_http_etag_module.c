@@ -8,6 +8,7 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+#include <ngx_md5.h>
 
 
 typedef struct {
@@ -17,24 +18,27 @@ typedef struct {
 
 
 static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
-//static ngx_http_output_body_filter_pt    ngx_http_next_body_filter;
 
 static void * ngx_http_etag_create_loc_conf(ngx_conf_t *cf);
-static char * ngx_http_etag_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
+static char * ngx_http_etag_merge_loc_conf(ngx_conf_t *cf, void *parent,
+		void *child);
 static ngx_int_t ngx_http_etag_init(ngx_conf_t *cf);
 static ngx_int_t ngx_http_etag_header_filter(ngx_http_request_t *r);
+
 
 static ngx_command_t  ngx_http_etag_commands[] = {
 		{
 				ngx_string( "etag" ),
-				NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+				NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|
+					NGX_CONF_FLAG,
 				ngx_conf_set_flag_slot,
 				NGX_HTTP_LOC_CONF_OFFSET,
 				offsetof(ngx_http_etag_loc_conf_t, enable),
 				NULL },
 		{
 				ngx_string( "etag_file"),
-				NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+				NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|
+					NGX_CONF_TAKE1,
 				ngx_conf_set_str_slot,
 				NGX_HTTP_LOC_CONF_OFFSET,
 				offsetof(ngx_http_etag_loc_conf_t, file),
@@ -68,6 +72,7 @@ ngx_module_t  ngx_http_etag_module = {
 		NGX_MODULE_V1_PADDING
 };
 
+
 static void * ngx_http_etag_create_loc_conf(ngx_conf_t *cf) {
 	ngx_http_etag_loc_conf_t *conf;
 
@@ -81,7 +86,8 @@ static void * ngx_http_etag_create_loc_conf(ngx_conf_t *cf) {
     return conf;
 }
 
-static char * ngx_http_etag_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child) {
+static char * ngx_http_etag_merge_loc_conf(ngx_conf_t *cf, void *parent,
+		void *child) {
     ngx_http_etag_loc_conf_t *prev = parent;
     ngx_http_etag_loc_conf_t *conf = child;
 
@@ -152,8 +158,52 @@ static ngx_int_t ngx_http_etag_header_filter(ngx_http_request_t *r) {
 			}
 
 			etag.len = ngx_sprintf(etag.data, "%T%z", of.mtime, of.size)
-							- etag.data;
-			ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0, "http etag file: %V", &path); ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0, "http etag generated: %V", &etag);
+					- etag.data;
+			ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
+					"http etag file: %V", &path);
+			ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
+					"http etag generated: %V", &etag);
+
+			u_char *hash = NULL;
+			ngx_uint_t digest_len = MD5_DIGEST_LENGTH;
+			ngx_uint_t hex_digest_len = MD5_DIGEST_LENGTH * 2;
+
+			hash = ngx_palloc(r->pool, digest_len);
+			if (hash == NULL) {
+				ngx_log_debug(NGX_LOG_DEBUG_HTTP, log, 0,
+						"[etag] failed to allocate memory");
+
+				return NGX_ERROR;
+			}
+
+			ngx_md5_t md5_ctx;
+
+			ngx_md5_init(&md5_ctx);
+			ngx_md5_update(&md5_ctx, etag.data, etag.len);
+			ngx_md5_final(hash, &md5_ctx);
+
+			ngx_str_t etag_hashed;
+			u_char *hashed;
+			static u_char hex[] = "0123456789abcdef";
+			ngx_uint_t i;
+
+			etag_hashed.data = ngx_palloc(r->pool, hex_digest_len);
+			if (etag_hashed.data == NULL) {
+				ngx_log_debug(NGX_LOG_DEBUG_HTTP, log, 0,
+						"[etag] failed to allocate memory");
+
+				return NGX_ERROR;
+			}
+
+			etag_hashed.len = hex_digest_len;
+			hashed = etag_hashed.data;
+			for (i = 0; i < hex_digest_len; i++) {
+				*hashed++ = hex[hash[i] >> 4];
+				*hashed++ = hex[hash[i] & 0xf];
+			}
+			*hashed = '\0';
+			ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
+					"http etag hashed: %V", &etag_hashed);
 
 			r->headers_out.etag = ngx_list_push(&r->headers_out.headers);
 			if (r->headers_out.etag == NULL) {
@@ -163,14 +213,13 @@ static ngx_int_t ngx_http_etag_header_filter(ngx_http_request_t *r) {
 			r->headers_out.etag->hash = 1;
 			r->headers_out.etag->key.data = (u_char *) "Etag";
 			r->headers_out.etag->key.len = sizeof("Etag") - 1;
-			r->headers_out.etag->value.data = etag.data;
-			r->headers_out.etag->value.len = etag.len;
+			r->headers_out.etag->value.data = etag_hashed.data;
+			r->headers_out.etag->value.len = etag_hashed.len;
 
 			r->headers_out.last_modified_time = of.mtime;
 
 			ngx_list_part_t *part;
 			ngx_table_elt_t *header;
-			ngx_uint_t i;
 
 			part = &r->headers_in.headers.part;
 			header = part->elts;

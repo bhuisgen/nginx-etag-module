@@ -1,4 +1,4 @@
-Nginx etag module version 0.2
+Nginx etag module version 0.3
 by Boris HUISGEN <bhuisgen@hbis.fr>
 
 This module brings the support of HTTP entity tags (ETags) to Nginx.

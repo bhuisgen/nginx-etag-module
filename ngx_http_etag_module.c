@@ -17,7 +17,7 @@ typedef struct {
 } ngx_http_etag_loc_conf_t;
 
 
-static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
+static ngx_http_output_header_filter_pt ngx_http_next_header_filter;
 
 static void * ngx_http_etag_create_loc_conf(ngx_conf_t *cf);
 static char * ngx_http_etag_merge_loc_conf(ngx_conf_t *cf, void *parent,
@@ -93,12 +93,27 @@ static char * ngx_http_etag_merge_loc_conf(ngx_conf_t *cf, void *parent,
 
     ngx_conf_merge_uint_value(conf->enable, prev->enable, 0);
     if ((conf->enable != 0) && (conf->enable != 1)) {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "etag must be 'on' or 'off'");
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+        		"etag must be 'on' or 'off'");
 
         return NGX_CONF_ERROR;
     }
 
     ngx_conf_merge_str_value(conf->file, prev->file, "");
+    if (ngx_strcmp(conf->file.data, "") != 0) {
+    	ngx_fd_t fd;
+
+    	fd = ngx_open_file(conf->file.data, NGX_FILE_RDWR, NGX_FILE_TRUNCATE,
+    			NGX_FILE_DEFAULT_ACCESS);
+    	if (fd == NGX_INVALID_FILE) {
+			ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+					ngx_open_file_n " \"%s\" failed", conf->file.data);
+
+			return NGX_CONF_ERROR;
+		}
+
+    	ngx_close_file(fd);
+    }
 
     return NGX_CONF_OK;
 }
@@ -118,9 +133,7 @@ static ngx_int_t ngx_http_etag_header_filter(ngx_http_request_t *r) {
 	log = r->connection->log;
 
 	if (loc_conf->enable == 1) {
-		ngx_http_core_loc_conf_t *clcf;
 		ngx_str_t path;
-		ngx_open_file_info_t of;
 
 		if (loc_conf->file.len > 0) {
 			path.data = loc_conf->file.data;
@@ -135,14 +148,15 @@ static ngx_int_t ngx_http_etag_header_filter(ngx_http_request_t *r) {
 			}
 		}
 
+		ngx_http_core_loc_conf_t *clcf;
+		ngx_open_file_info_t of;
+
 		clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
 		of.test_dir = 0;
 		of.valid = clcf->open_file_cache_valid;
 		of.min_uses = clcf->open_file_cache_min_uses;
 		of.errors = clcf->open_file_cache_errors;
 		of.events = clcf->open_file_cache_events;
-
-		ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0, "etag file: %V", &path);
 
 		if (ngx_open_cached_file(clcf->open_file_cache, &path, &of, r->pool)
 				== NGX_OK) {
@@ -151,9 +165,6 @@ static ngx_int_t ngx_http_etag_header_filter(ngx_http_request_t *r) {
 			etag.data = ngx_palloc(r->pool, sizeof(of.size) + sizeof(of.mtime)
 					+ 1);
 			if (etag.data == NULL) {
-				ngx_log_debug(NGX_LOG_DEBUG_HTTP, log, 0,
-						"[etag] failed to allocate memory");
-
 				return NGX_ERROR;
 			}
 
@@ -164,15 +175,12 @@ static ngx_int_t ngx_http_etag_header_filter(ngx_http_request_t *r) {
 			ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
 					"http etag generated: %V", &etag);
 
-			u_char *hash = NULL;
+			u_char *digest = NULL;
 			ngx_uint_t digest_len = MD5_DIGEST_LENGTH;
 			ngx_uint_t hex_digest_len = MD5_DIGEST_LENGTH * 2;
 
-			hash = ngx_palloc(r->pool, digest_len);
-			if (hash == NULL) {
-				ngx_log_debug(NGX_LOG_DEBUG_HTTP, log, 0,
-						"[etag] failed to allocate memory");
-
+			digest = ngx_palloc(r->pool, digest_len);
+			if (digest == NULL) {
 				return NGX_ERROR;
 			}
 
@@ -180,30 +188,27 @@ static ngx_int_t ngx_http_etag_header_filter(ngx_http_request_t *r) {
 
 			ngx_md5_init(&md5_ctx);
 			ngx_md5_update(&md5_ctx, etag.data, etag.len);
-			ngx_md5_final(hash, &md5_ctx);
+			ngx_md5_final(digest, &md5_ctx);
 
-			ngx_str_t etag_hashed;
+			ngx_str_t etag_hash;
 			u_char *hashed;
 			static u_char hex[] = "0123456789abcdef";
 			ngx_uint_t i;
 
-			etag_hashed.data = ngx_palloc(r->pool, hex_digest_len);
-			if (etag_hashed.data == NULL) {
-				ngx_log_debug(NGX_LOG_DEBUG_HTTP, log, 0,
-						"[etag] failed to allocate memory");
-
+			etag_hash.data = ngx_palloc(r->pool, hex_digest_len);
+			if (etag_hash.data == NULL) {
 				return NGX_ERROR;
 			}
 
-			etag_hashed.len = hex_digest_len;
-			hashed = etag_hashed.data;
+			etag_hash.len = hex_digest_len;
+			hashed = etag_hash.data;
 			for (i = 0; i < hex_digest_len; i++) {
-				*hashed++ = hex[hash[i] >> 4];
-				*hashed++ = hex[hash[i] & 0xf];
+				*hashed++ = hex[digest[i] >> 4];
+				*hashed++ = hex[digest[i] & 0xf];
 			}
 			*hashed = '\0';
 			ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
-					"http etag hashed: %V", &etag_hashed);
+					"http etag hashed: %V", &etag_hash);
 
 			r->headers_out.etag = ngx_list_push(&r->headers_out.headers);
 			if (r->headers_out.etag == NULL) {
@@ -213,8 +218,8 @@ static ngx_int_t ngx_http_etag_header_filter(ngx_http_request_t *r) {
 			r->headers_out.etag->hash = 1;
 			r->headers_out.etag->key.data = (u_char *) "Etag";
 			r->headers_out.etag->key.len = sizeof("Etag") - 1;
-			r->headers_out.etag->value.data = etag_hashed.data;
-			r->headers_out.etag->value.len = etag_hashed.len;
+			r->headers_out.etag->value.data = etag_hash.data;
+			r->headers_out.etag->value.len = etag_hash.len;
 
 			r->headers_out.last_modified_time = of.mtime;
 

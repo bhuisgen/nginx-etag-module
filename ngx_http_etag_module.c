@@ -12,10 +12,13 @@
 
 
 typedef struct {
-	ngx_uint_t enable;
+	ngx_flag_t enable;
 	ngx_str_t file;
 } ngx_http_etag_loc_conf_t;
 
+typedef struct {
+    ngx_flag_t done;
+} ngx_http_etag_module_ctx_t;
 
 static ngx_http_output_header_filter_pt ngx_http_next_header_filter;
 
@@ -24,7 +27,6 @@ static char * ngx_http_etag_merge_loc_conf(ngx_conf_t *cf, void *parent,
 		void *child);
 static ngx_int_t ngx_http_etag_init(ngx_conf_t *cf);
 static ngx_int_t ngx_http_etag_header_filter(ngx_http_request_t *r);
-
 
 static ngx_command_t  ngx_http_etag_commands[] = {
 		{
@@ -91,7 +93,7 @@ static char * ngx_http_etag_merge_loc_conf(ngx_conf_t *cf, void *parent,
     ngx_http_etag_loc_conf_t *prev = parent;
     ngx_http_etag_loc_conf_t *conf = child;
 
-    ngx_conf_merge_uint_value(conf->enable, prev->enable, 0);
+    ngx_conf_merge_value(conf->enable, prev->enable, 0);
     if ((conf->enable != 0) && (conf->enable != 1)) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
         		"etag must be 'on' or 'off'");
@@ -132,7 +134,7 @@ static ngx_int_t ngx_http_etag_header_filter(ngx_http_request_t *r) {
 	loc_conf = ngx_http_get_module_loc_conf(r, ngx_http_etag_module);
 	log = r->connection->log;
 
-	if (loc_conf->enable == 1) {
+    if (loc_conf->enable) {
 		ngx_str_t path;
 
 		if (loc_conf->file.len > 0) {
